@@ -64,27 +64,27 @@ def total_interest(principal: float, annual_rate: float, tenure_months: int) -> 
 def amortisation_schedule(principal: float, annual_rate: float, tenure_months: int) -> List[Dict[str, float]]:
     """Build an amortization schedule for each month.
 
-    Args:
-        principal: Loan principal amount.
-        annual_rate: Annual interest rate in percent.
-        tenure_months: Loan tenure in months.
-
-    Returns:
-        A list of rows (one per month) containing:
-        month, emi, interest, principal, and remaining balance.
+    Contract:
+    - one row per month in the tenure (months 1..tenure_months inclusive)
+    - final month should amortise the remaining balance (after rounding)
     """
     r = _monthly_rate(annual_rate)
     instalment = emi(principal, annual_rate, tenure_months)
+
     balance = principal
-    rows = []
-    for month in range(1, tenure_months):
+    rows: List[Dict[str, float]] = []
+    for month in range(1, tenure_months + 1):
         interest = round(balance * r, 2)
+
+        # Default: use fixed EMI (already rounded to 2 decimals).
         principal_part = round(instalment - interest, 2)
+        instalment_amt = instalment
+
+        # Final month: force amortisation to clear remaining balance.
         if month == tenure_months:
             principal_part = round(balance, 2)
             instalment_amt = round(principal_part + interest, 2)
-        else:
-            instalment_amt = instalment
+
         balance = round(balance - principal_part, 2)
         rows.append({
             "month": month,
