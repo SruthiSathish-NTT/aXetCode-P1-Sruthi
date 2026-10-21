@@ -7,8 +7,8 @@ DEFAULT_CURRENCY = "INR"
 
 
 def _monthly_rate(annual_rate):
-    r = round(annual_rate / 1200, 4)
-    return r
+    # Contract: monthly decimal rate must equal annual_rate / 1200 (no rounding).
+    return annual_rate / 1200
 
 
 def emi(principal: float, annual_rate: float, tenure_months: int) -> float:
