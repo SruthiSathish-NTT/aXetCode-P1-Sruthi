@@ -2,12 +2,20 @@ import math
 
 import pytest
 
+from datetime import date
+
 from loan_calc.calculator import (
     _monthly_rate,
     amortisation_schedule,
+    compare_offers,
+    eligible_amount,
     emi,
+    format_inr,
     outstanding_after,
     prepayment_savings,
+    remaining_tenure,
+    schedule_to_csv,
+    summary,
     total_interest,
     total_payment,
 )
@@ -312,3 +320,225 @@ def test_prepayment_less_than_balance_shortens_tenure_and_saves_interest():
     assert res["new_tenure"] < tenure_months
     assert res["months_saved"] > 0
     assert res["interest_saved"] > 0
+
+# ------------------------------------
+# E) Validation and remaining tenure
+# ------------------------------------
+
+@pytest.mark.parametrize(
+    ("principal", "annual_rate", "tenure_months", "message"),
+    [
+        (100_000.00, 9.0, 0, "tenure must be positive"),
+        (100_000.00, 9.0, -12, "tenure must be positive"),
+        (0.00, 9.0, 12, "principal must be positive"),
+        (-1.00, 9.0, 12, "principal must be positive"),
+    ],
+)
+def test_emi_rejects_non_positive_principal_or_tenure(
+    principal,
+    annual_rate,
+    tenure_months,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        emi(principal, annual_rate, tenure_months)
+
+
+def test_outstanding_after_more_than_full_tenure_is_zero():
+    result = outstanding_after(
+        principal=100_000.00,
+        annual_rate=9.0,
+        tenure_months=24,
+        months_paid=25,
+    )
+
+    assert result == 0.0
+
+
+def test_remaining_tenure_is_zero_when_balance_is_already_paid():
+    assert remaining_tenure(
+        balance=0.0,
+        annual_rate=9.0,
+        instalment=5_000.00,
+    ) == 0
+
+
+def test_remaining_tenure_at_zero_interest_uses_simple_division():
+    assert remaining_tenure(
+        balance=10_000.00,
+        annual_rate=0.0,
+        instalment=3_000.00,
+    ) == 4
+
+
+def test_remaining_tenure_rejects_instalment_that_cannot_cover_interest():
+    with pytest.raises(ValueError, match="instalment too small to repay"):
+        remaining_tenure(
+            balance=100_000.00,
+            annual_rate=12.0,
+            instalment=1_000.00,
+        )
+
+# -------------------------
+# F) Loan offer comparison
+# -------------------------
+
+def test_compare_offers_sorts_by_total_cost_and_includes_processing_fee():
+    offers = [
+        {
+            "bank": "Higher Cost Bank",
+            "rate": 10.0,
+            "tenure": 24,
+        },
+        {
+            "bank": "Lower Cost Bank",
+            "rate": 8.0,
+            "tenure": 24,
+            "processing_fee_pct": 1.0,
+        },
+    ]
+
+    results = compare_offers(principal=100_000.00, offers=offers)
+
+    assert len(results) == 2
+    assert results[0]["total_cost"] <= results[1]["total_cost"]
+    assert results[0]["bank"] == "Lower Cost Bank"
+    assert results[0]["processing_fee"] == pytest.approx(1_000.00)
+
+    for result in results:
+        assert set(result) == {
+            "bank",
+            "emi",
+            "total_interest",
+            "processing_fee",
+            "total_cost",
+        }
+        assert result["total_cost"] == pytest.approx(
+            result["total_interest"] + result["processing_fee"],
+            abs=0.01,
+        )
+
+# ---------------------
+# G) Eligibility amount
+# ---------------------
+
+def test_eligible_amount_is_zero_when_no_income_is_available_for_emi():
+    result = eligible_amount(
+        monthly_income=50_000.00,
+        existing_emis=25_000.00,
+        annual_rate=9.0,
+        tenure_months=120,
+        foir=0.5,
+    )
+
+    assert result == 0.0
+
+
+def test_eligible_amount_at_zero_interest():
+    result = eligible_amount(
+        monthly_income=100_000.00,
+        existing_emis=10_000.00,
+        annual_rate=0.0,
+        tenure_months=12,
+        foir=0.5,
+    )
+
+    # Available EMI capacity: 100,000 * 0.5 - 10,000 = 40,000
+    # At 0% interest over 12 months: 40,000 * 12 = 480,000.
+    assert result == pytest.approx(480_000.00)
+
+
+def test_eligible_amount_at_interest_matches_available_emi_capacity():
+    monthly_income = 100_000.00
+    existing_emis = 10_000.00
+    foir = 0.5
+    annual_rate = 9.0
+    tenure_months = 120
+
+    available_emi = monthly_income * foir - existing_emis
+
+    amount = eligible_amount(
+        monthly_income=monthly_income,
+        existing_emis=existing_emis,
+        annual_rate=annual_rate,
+        tenure_months=tenure_months,
+        foir=foir,
+    )
+
+    assert amount > 0
+    assert emi(amount, annual_rate, tenure_months) == pytest.approx(
+        available_emi,
+        abs=0.01,
+    )
+
+# ------------------
+# H) INR formatting
+# ------------------
+
+@pytest.mark.parametrize(
+    ("amount", "expected"),
+    [
+        (12.3, "₹12.30"),
+        (1_23_456.78, "₹1,23,456.78"),
+        (-1_23_456.78, "-₹1,23,456.78"),
+        (1_23_45_678.9, "₹1,23,45,678.90"),
+    ],
+)
+def test_format_inr_uses_indian_numbering_and_two_decimal_places(amount, expected):
+    assert format_inr(amount) == expected
+
+# -----------------------
+# I) CSV and loan summary
+# -----------------------
+
+def test_schedule_to_csv_writes_header_and_schedule_rows(tmp_path):
+    rows = [
+        {
+            "month": 1,
+            "emi": 10_000.00,
+            "interest": 1_000.00,
+            "principal": 9_000.00,
+            "balance": 91_000.00,
+        },
+        {
+            "month": 2,
+            "emi": 10_000.00,
+            "interest": 910.00,
+            "principal": 9_090.00,
+            "balance": 81_910.00,
+        },
+    ]
+    output_path = tmp_path / "schedule.csv"
+
+    result = schedule_to_csv(rows, str(output_path))
+
+    assert result is None
+    assert output_path.read_text() == (
+        "month,emi,interest,principal,balance\n"
+        "1,10000.0,1000.0,9000.0,91000.0\n"
+        "2,10000.0,910.0,9090.0,81910.0\n"
+    )
+
+def test_summary_returns_formatted_values_and_expected_end_month():
+    result = summary(
+        principal=1_000_000.00,
+        annual_rate=9.0,
+        tenure_months=240,
+        start=date(2024, 1, 15),
+    )
+
+    assert result["principal"] == "₹10,00,000.00"
+    assert result["rate"] == "9.0% p.a."
+    assert result["tenure"] == "240 months"
+    assert result["emi"] == format_inr(
+        emi(
+            principal=1_000_000.00,
+            annual_rate=9.0,
+            tenure_months=240,
+        )
+    )
+    assert result["total_interest"].startswith("₹")
+    assert result["total_payment"].startswith("₹")
+    assert result["last_emi"] == "2044-01"
+    assert result["currency"] == "INR"
+
